@@ -46,7 +46,7 @@ export const SECTIONS_CONFIG = {
     label: "Post Process",
     icon: Sparkles,
     component: PostProcessingSettings,
-    enabled: (settings) => settings?.post_process_enabled ?? false,
+    enabled: () => true,
   },
   history: {
     label: "History",
@@ -58,7 +58,7 @@ export const SECTIONS_CONFIG = {
     label: "Debug",
     icon: FlaskConical,
     component: DebugSettings,
-    enabled: (settings) => settings?.debug_mode ?? false,
+    enabled: () => true,
   },
   about: {
     label: "About",

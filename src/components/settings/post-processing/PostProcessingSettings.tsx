@@ -16,27 +16,10 @@ import { ApiKeyField } from "../PostProcessingSettingsApi/ApiKeyField";
 import { ModelSelect } from "../PostProcessingSettingsApi/ModelSelect";
 import { usePostProcessProviderState } from "../PostProcessingSettingsApi/usePostProcessProviderState";
 import { useSettings } from "../../../hooks/useSettings";
-import type { LLMPrompt } from "@/bindings";
-
-const DisabledNotice: React.FC<{ children: React.ReactNode }> = ({
-  children,
-}) => (
-  <div className="p-4 bg-mid-gray/5 rounded-lg border border-mid-gray/20 text-center">
-    <p className="text-sm text-mid-gray">{children}</p>
-  </div>
-);
+import { PostProcessingToggle } from "../PostProcessingToggle";
 
 const PostProcessingSettingsApiComponent: React.FC = () => {
   const state = usePostProcessProviderState();
-
-  if (!state.enabled) {
-    return (
-      <DisabledNotice>
-        Post processing is currently disabled. Enable it in Debug settings to
-        configure.
-      </DisabledNotice>
-    );
-  }
 
   return (
     <>
@@ -145,7 +128,6 @@ const PostProcessingSettingsPromptsComponent: React.FC = () => {
   const [draftName, setDraftName] = useState("");
   const [draftText, setDraftText] = useState("");
 
-  const enabled = getSetting("post_process_enabled") || false;
   const prompts = getSetting("post_process_prompts") || [];
   const selectedPromptId = getSetting("post_process_selected_prompt_id") || "";
   const selectedPrompt =
@@ -235,15 +217,6 @@ const PostProcessingSettingsPromptsComponent: React.FC = () => {
     setDraftName("");
     setDraftText("");
   };
-
-  if (!enabled) {
-    return (
-      <DisabledNotice>
-        Post processing is currently disabled. Enable it in Debug settings to
-        configure.
-      </DisabledNotice>
-    );
-  }
 
   const hasPrompts = prompts.length > 0;
   const isDirty =
@@ -350,7 +323,7 @@ const PostProcessingSettingsPromptsComponent: React.FC = () => {
 
         {isCreating && (
           <div className="space-y-3">
-            <div className="space-y-2 block flex flex-col">
+            <div className="space-y-2 flex flex-col">
               <label className="text-sm font-semibold text-text">
                 Prompt Label
               </label>
@@ -418,6 +391,10 @@ PostProcessingSettingsPrompts.displayName = "PostProcessingSettingsPrompts";
 export const PostProcessingSettings: React.FC = () => {
   return (
     <div className="max-w-3xl w-full mx-auto space-y-6">
+      <SettingsGroup title="Enable / Disable">
+        <PostProcessingToggle descriptionMode="tooltip" grouped={true} />
+      </SettingsGroup>
+
       <SettingsGroup title="API (OpenAI Compatible)">
         <PostProcessingSettingsApi />
       </SettingsGroup>
