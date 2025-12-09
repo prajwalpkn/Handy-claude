@@ -28,6 +28,7 @@ pub struct AudioRecorder {
     worker_handle: Option<std::thread::JoinHandle<()>>,
     vad: Option<Arc<Mutex<Box<dyn vad::VoiceActivityDetector>>>>,
     level_cb: Option<Arc<dyn Fn(Vec<f32>) + Send + Sync + 'static>>,
+    chunk_cb: Option<Arc<dyn Fn(Vec<f32>) + Send + Sync + 'static>>,
 }
 
 impl AudioRecorder {
@@ -38,6 +39,7 @@ impl AudioRecorder {
             worker_handle: None,
             vad: None,
             level_cb: None,
+            chunk_cb: None,
         })
     }
 
@@ -51,6 +53,14 @@ impl AudioRecorder {
         F: Fn(Vec<f32>) + Send + Sync + 'static,
     {
         self.level_cb = Some(Arc::new(cb));
+        self
+    }
+
+    pub fn with_chunk_callback<F>(mut self, cb: F) -> Self
+    where
+        F: Fn(Vec<f32>) + Send + Sync + 'static,
+    {
+        self.chunk_cb = Some(Arc::new(cb));
         self
     }
 
@@ -74,6 +84,7 @@ impl AudioRecorder {
         let vad = self.vad.clone();
         // Move the optional level callback into the worker thread
         let level_cb = self.level_cb.clone();
+        let chunk_cb = self.chunk_cb.clone();
 
         let worker = std::thread::spawn(move || {
             let config = AudioRecorder::get_preferred_config(&thread_device)
@@ -117,7 +128,7 @@ impl AudioRecorder {
             stream.play().expect("failed to start stream");
 
             // keep the stream alive while we process samples
-            run_consumer(sample_rate, vad, sample_rx, cmd_rx, level_cb);
+            run_consumer(sample_rate, vad, sample_rx, cmd_rx, level_cb, chunk_cb);
             // stream is dropped here, after run_consumer returns
         });
 
@@ -245,6 +256,7 @@ fn run_consumer(
     sample_rx: mpsc::Receiver<Vec<f32>>,
     cmd_rx: mpsc::Receiver<Cmd>,
     level_cb: Option<Arc<dyn Fn(Vec<f32>) + Send + Sync + 'static>>,
+    chunk_cb: Option<Arc<dyn Fn(Vec<f32>) + Send + Sync + 'static>>,
 ) {
     let mut frame_resampler = FrameResampler::new(
         in_sample_rate as usize,
@@ -254,6 +266,11 @@ fn run_consumer(
 
     let mut processed_samples = Vec::<f32>::new();
     let mut recording = false;
+
+    // For periodic chunk emission during recording
+    // Emit chunks every ~1 second (16,000 samples at 16kHz)
+    const CHUNK_SIZE: usize = 16_000;
+    let mut samples_since_last_chunk = 0;
 
     // ---------- spectrum visualisation setup ---------------------------- //
     const BUCKETS: usize = 16;
@@ -271,20 +288,44 @@ fn run_consumer(
         recording: bool,
         vad: &Option<Arc<Mutex<Box<dyn vad::VoiceActivityDetector>>>>,
         out_buf: &mut Vec<f32>,
-    ) {
+        samples_since_last_chunk: &mut usize,
+        chunk_cb: &Option<Arc<dyn Fn(Vec<f32>) + Send + Sync + 'static>>,
+    ) -> usize {
         if !recording {
-            return;
+            return 0;
         }
+
+        let mut added_samples = 0;
 
         if let Some(vad_arc) = vad {
             let mut det = vad_arc.lock().unwrap();
             match det.push_frame(samples).unwrap_or(VadFrame::Speech(samples)) {
-                VadFrame::Speech(buf) => out_buf.extend_from_slice(buf),
+                VadFrame::Speech(buf) => {
+                    out_buf.extend_from_slice(buf);
+                    added_samples = buf.len();
+                }
                 VadFrame::Noise => {}
             }
         } else {
             out_buf.extend_from_slice(samples);
+            added_samples = samples.len();
         }
+
+        // Check if we should emit a chunk
+        if added_samples > 0 {
+            *samples_since_last_chunk += added_samples;
+
+            // If we've accumulated enough samples, emit a chunk for real-time transcription
+            if *samples_since_last_chunk >= CHUNK_SIZE {
+                if let Some(cb) = chunk_cb {
+                    // Clone the accumulated samples and emit them
+                    cb(out_buf.clone());
+                }
+                *samples_since_last_chunk = 0;
+            }
+        }
+
+        added_samples
     }
 
     loop {
@@ -302,7 +343,14 @@ fn run_consumer(
 
         // ---------- existing pipeline ------------------------------------ //
         frame_resampler.push(&raw, &mut |frame: &[f32]| {
-            handle_frame(frame, recording, &vad, &mut processed_samples)
+            handle_frame(
+                frame,
+                recording,
+                &vad,
+                &mut processed_samples,
+                &mut samples_since_last_chunk,
+                &chunk_cb,
+            );
         });
 
         // non-blocking check for a command
@@ -311,6 +359,7 @@ fn run_consumer(
                 Cmd::Start => {
                     processed_samples.clear();
                     recording = true;
+                    samples_since_last_chunk = 0; // Reset chunk counter
                     visualizer.reset(); // Reset visualization buffer
                     if let Some(v) = &vad {
                         v.lock().unwrap().reset();
@@ -321,7 +370,15 @@ fn run_consumer(
 
                     frame_resampler.finish(&mut |frame: &[f32]| {
                         // we still want to process the last few frames
-                        handle_frame(frame, true, &vad, &mut processed_samples)
+                        // Note: we don't emit chunks on stop, as the final full transcription will happen
+                        handle_frame(
+                            frame,
+                            true,
+                            &vad,
+                            &mut processed_samples,
+                            &mut 0, // Don't track chunks in final processing
+                            &None,  // Don't emit chunks when finishing
+                        );
                     });
 
                     let _ = reply_tx.send(std::mem::take(&mut processed_samples));

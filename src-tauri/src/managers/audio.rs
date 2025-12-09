@@ -132,6 +132,39 @@ fn create_audio_recorder(
             move |levels| {
                 utils::emit_levels(&app_handle, &levels);
             }
+        })
+        .with_chunk_callback({
+            let app_handle = app_handle.clone();
+            move |audio_chunk| {
+                // Spawn a task to transcribe this chunk in real-time
+                let ah = app_handle.clone();
+                let chunk = audio_chunk.clone();
+                tauri::async_runtime::spawn(async move {
+                    use crate::managers::transcription::TranscriptionManager;
+                    use std::sync::Arc;
+
+                    // Get the transcription manager
+                    let tm = ah.state::<Arc<TranscriptionManager>>();
+
+                    // Only transcribe if model is loaded
+                    if !tm.is_model_loaded() {
+                        return;
+                    }
+
+                    // Transcribe the chunk
+                    match tm.transcribe(chunk) {
+                        Ok(text) => {
+                            if !text.is_empty() {
+                                // Emit the partial transcription to the overlay
+                                crate::overlay::emit_transcription_update(&ah, &text);
+                            }
+                        }
+                        Err(e) => {
+                            log::debug!("Chunk transcription failed: {}", e);
+                        }
+                    }
+                });
+            }
         });
 
     Ok(recorder)

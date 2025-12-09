@@ -402,10 +402,23 @@ impl ShortcutAction for TranscribeAction {
                             transcription
                         );
                         if !transcription.is_empty() {
+                            // Set the final transcription in the overlay (replaces any partial transcriptions)
+                            crate::overlay::set_final_transcription(&ah, &transcription);
+
                             let settings = get_settings(&ah);
                             let mut final_text = transcription.clone();
                             let mut post_processed_text: Option<String> = None;
                             let mut post_process_prompt: Option<String> = None;
+
+                            // Check if post-processing is needed
+                            let needs_post_processing = settings.post_process_enabled
+                                || (settings.selected_language == "zh-Hans"
+                                    || settings.selected_language == "zh-Hant");
+
+                            // If post-processing is needed, show that state
+                            if needs_post_processing {
+                                crate::overlay::show_post_processing_overlay(&ah);
+                            }
 
                             // First, check if Chinese variant conversion is needed
                             if let Some(converted_text) =
@@ -461,7 +474,7 @@ impl ShortcutAction for TranscribeAction {
                                     ),
                                     Err(e) => error!("Failed to paste transcription: {}", e),
                                 }
-                                // Hide the overlay after transcription is complete
+                                // Hide the overlay after pasting is complete
                                 utils::hide_recording_overlay(&ah_clone);
                                 change_tray_icon(&ah_clone, TrayIconState::Idle);
                             })

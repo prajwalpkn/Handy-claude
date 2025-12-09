@@ -8,12 +8,13 @@ import {
 import "./RecordingOverlay.css";
 import { commands } from "@/bindings";
 
-type OverlayState = "recording" | "transcribing";
+type OverlayState = "recording" | "transcribing" | "post-processing";
 
 const RecordingOverlay: React.FC = () => {
   const [isVisible, setIsVisible] = useState(false);
   const [state, setState] = useState<OverlayState>("recording");
   const [levels, setLevels] = useState<number[]>(Array(16).fill(0));
+  const [transcriptionText, setTranscriptionText] = useState("");
   const smoothedLevelsRef = useRef<number[]>(Array(16).fill(0));
 
   useEffect(() => {
@@ -23,11 +24,16 @@ const RecordingOverlay: React.FC = () => {
         const overlayState = event.payload as OverlayState;
         setState(overlayState);
         setIsVisible(true);
+        // Clear transcription text when showing overlay
+        if (overlayState === "recording") {
+          setTranscriptionText("");
+        }
       });
 
       // Listen for hide-overlay event from Rust
       const unlistenHide = await listen("hide-overlay", () => {
         setIsVisible(false);
+        setTranscriptionText("");
       });
 
       // Listen for mic-level updates
@@ -44,11 +50,30 @@ const RecordingOverlay: React.FC = () => {
         setLevels(smoothed.slice(0, 9));
       });
 
+      // Listen for transcription updates (replace text each time)
+      const unlistenTranscription = await listen<string>(
+        "transcription-update",
+        (event) => {
+          // Replace the text completely with the latest transcription
+          setTranscriptionText(event.payload);
+        }
+      );
+
+      // Listen for final transcription (replaces existing text)
+      const unlistenFinalTranscription = await listen<string>(
+        "transcription-final",
+        (event) => {
+          setTranscriptionText(event.payload);
+        }
+      );
+
       // Cleanup function
       return () => {
         unlistenShow();
         unlistenHide();
         unlistenLevel();
+        unlistenTranscription();
+        unlistenFinalTranscription();
       };
     };
 
@@ -64,11 +89,15 @@ const RecordingOverlay: React.FC = () => {
   };
 
   return (
-    <div className={`recording-overlay ${isVisible ? "fade-in" : ""}`}>
+    <div
+      className={`recording-overlay ${isVisible ? "fade-in" : ""} ${
+        transcriptionText ? "expanded" : ""
+      }`}
+    >
       <div className="overlay-left">{getIcon()}</div>
 
       <div className="overlay-middle">
-        {state === "recording" && (
+        {state === "recording" && !transcriptionText && (
           <div className="bars-container">
             {levels.map((v, i) => (
               <div
@@ -83,8 +112,14 @@ const RecordingOverlay: React.FC = () => {
             ))}
           </div>
         )}
-        {state === "transcribing" && (
+        {state === "transcribing" && !transcriptionText && (
           <div className="transcribing-text">Transcribing...</div>
+        )}
+        {state === "post-processing" && !transcriptionText && (
+          <div className="transcribing-text">Post-processing...</div>
+        )}
+        {transcriptionText && (
+          <div className="transcription-text">{transcriptionText}</div>
         )}
       </div>
 

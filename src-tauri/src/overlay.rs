@@ -25,8 +25,8 @@ tauri_panel! {
     })
 }
 
-const OVERLAY_WIDTH: f64 = 172.0;
-const OVERLAY_HEIGHT: f64 = 36.0;
+const OVERLAY_WIDTH: f64 = 600.0;  // Increased to accommodate text
+const OVERLAY_HEIGHT: f64 = 200.0; // Increased to allow for multiple lines
 
 #[cfg(target_os = "macos")]
 const OVERLAY_TOP_OFFSET: f64 = 46.0;
@@ -288,5 +288,39 @@ pub fn emit_levels(app_handle: &AppHandle, levels: &Vec<f32>) {
     // also emit to the recording overlay if it's open
     if let Some(overlay_window) = app_handle.get_webview_window("recording_overlay") {
         let _ = overlay_window.emit("mic-level", levels);
+    }
+}
+
+/// Shows the post-processing overlay state
+pub fn show_post_processing_overlay(app_handle: &AppHandle) {
+    // Check if overlay should be shown based on position setting
+    let settings = settings::get_settings(app_handle);
+    if settings.overlay_position == OverlayPosition::None {
+        return;
+    }
+
+    if let Some(overlay_window) = app_handle.get_webview_window("recording_overlay") {
+        let _ = overlay_window.show();
+
+        // On Windows, aggressively re-assert "topmost" in the native Z-order after showing
+        #[cfg(target_os = "windows")]
+        force_overlay_topmost(&overlay_window);
+
+        // Emit event to switch to post-processing state
+        let _ = overlay_window.emit("show-overlay", "post-processing");
+    }
+}
+
+/// Emits transcription text to the overlay for real-time display (appends to existing text)
+pub fn emit_transcription_update(app_handle: &AppHandle, text: &str) {
+    if let Some(overlay_window) = app_handle.get_webview_window("recording_overlay") {
+        let _ = overlay_window.emit("transcription-update", text);
+    }
+}
+
+/// Sets the final transcription text in the overlay (replaces existing text)
+pub fn set_final_transcription(app_handle: &AppHandle, text: &str) {
+    if let Some(overlay_window) = app_handle.get_webview_window("recording_overlay") {
+        let _ = overlay_window.emit("transcription-final", text);
     }
 }

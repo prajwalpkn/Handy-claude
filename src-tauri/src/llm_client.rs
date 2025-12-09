@@ -11,7 +11,8 @@ pub fn create_client(
         .with_api_base(base_url)
         .with_api_key(api_key);
 
-    // Create client with provider-specific configurations
+
+        // Create client with provider-specific configurations
     let client = if provider.id == "anthropic" {
         let mut headers = reqwest::header::HeaderMap::new();
         headers.insert(
