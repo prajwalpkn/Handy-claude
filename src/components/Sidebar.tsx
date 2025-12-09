@@ -34,37 +34,37 @@ export const SECTIONS_CONFIG = {
     label: "General",
     icon: HandyHand,
     component: GeneralSettings,
-    enabled: () => true,
+    enabled: (_settings: any) => true,
   },
   advanced: {
     label: "Advanced",
     icon: Cog,
     component: AdvancedSettings,
-    enabled: () => true,
+    enabled: (_settings: any) => true,
   },
   postprocessing: {
     label: "Post Process",
     icon: Sparkles,
     component: PostProcessingSettings,
-    enabled: () => true,
+    enabled: (_settings: any) => true,
   },
   history: {
     label: "History",
     icon: History,
     component: HistorySettings,
-    enabled: () => true,
+    enabled: (_settings: any) => true,
   },
   debug: {
     label: "Debug",
     icon: FlaskConical,
     component: DebugSettings,
-    enabled: () => true,
+    enabled: (_settings: any) => true,
   },
   about: {
     label: "About",
     icon: Info,
     component: AboutSettings,
-    enabled: () => true,
+    enabled: (_settings: any) => true,
   },
 } as const satisfies Record<string, SectionConfig>;
 
