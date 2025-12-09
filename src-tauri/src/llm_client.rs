@@ -11,7 +11,7 @@ pub fn create_client(
         .with_api_base(base_url)
         .with_api_key(api_key);
 
-    // Create client with Anthropic-specific header if needed
+    // Create client with provider-specific configurations
     let client = if provider.id == "anthropic" {
         let mut headers = reqwest::header::HeaderMap::new();
         headers.insert(
@@ -21,6 +21,14 @@ pub fn create_client(
 
         let http_client = reqwest::Client::builder()
             .default_headers(headers)
+            .build()
+            .map_err(|e| format!("Failed to build HTTP client: {}", e))?;
+
+        Client::with_config(config).with_http_client(http_client)
+    } else if provider.id == "groq" || provider.id == "custom" {
+        // For Groq and custom providers, use a client with response interceptor
+        // to handle non-standard service_tier values
+        let http_client = reqwest::Client::builder()
             .build()
             .map_err(|e| format!("Failed to build HTTP client: {}", e))?;
 

@@ -2,7 +2,7 @@ use crate::audio_feedback::{play_feedback_sound, play_feedback_sound_blocking, S
 use crate::managers::audio::AudioRecordingManager;
 use crate::managers::history::HistoryManager;
 use crate::managers::transcription::TranscriptionManager;
-use crate::settings::{get_settings, AppSettings};
+use crate::settings::{get_settings, AppSettings, PostProcessProvider};
 use crate::shortcut;
 use crate::tray::{change_tray_icon, TrayIconState};
 use crate::utils::{self, show_recording_overlay, show_transcribing_overlay};
@@ -27,6 +27,62 @@ pub trait ShortcutAction: Send + Sync {
 
 // Transcribe Action
 struct TranscribeAction;
+
+/// Make a raw HTTP request to OpenAI-compatible API for providers with non-standard responses
+async fn make_chat_completion_request_raw(
+    provider: &PostProcessProvider,
+    api_key: &str,
+    model: &str,
+    prompt: &str,
+) -> Result<String, String> {
+    let base_url = provider.base_url.trim_end_matches('/');
+    let url = format!("{}/chat/completions", base_url);
+
+    let client = reqwest::Client::new();
+    let payload = serde_json::json!({
+        "model": model,
+        "messages": [
+            {
+                "role": "user",
+                "content": prompt
+            }
+        ]
+    });
+
+    let response = client
+        .post(&url)
+        .header("Authorization", format!("Bearer {}", api_key))
+        .header("Content-Type", "application/json")
+        .json(&payload)
+        .send()
+        .await
+        .map_err(|e| format!("HTTP request failed: {}", e))?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let error_text = response
+            .text()
+            .await
+            .unwrap_or_else(|_| "Unable to read error response".to_string());
+        return Err(format!("API error ({}): {}", status, error_text));
+    }
+
+    let response_json: serde_json::Value = response
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse JSON response: {}", e))?;
+
+    // Extract content from the response
+    let content = response_json
+        .get("choices")
+        .and_then(|choices| choices.get(0))
+        .and_then(|choice| choice.get("message"))
+        .and_then(|message| message.get("content"))
+        .and_then(|content| content.as_str())
+        .ok_or_else(|| "Response does not contain expected content field".to_string())?;
+
+    Ok(content.to_string())
+}
 
 async fn maybe_post_process_transcription(
     settings: &AppSettings,
@@ -101,6 +157,29 @@ async fn maybe_post_process_transcription(
     let processed_prompt = prompt.replace("${output}", transcription);
     debug!("Processed prompt length: {} chars", processed_prompt.len());
 
+    // For Groq and custom providers, use manual HTTP request to handle non-standard fields
+    if provider.id == "groq" || provider.id == "custom" {
+        match make_chat_completion_request_raw(&provider, &api_key, &model, &processed_prompt).await {
+            Ok(content) => {
+                debug!(
+                    "LLM post-processing succeeded for provider '{}'. Output length: {} chars",
+                    provider.id,
+                    content.len()
+                );
+                return Some(content);
+            }
+            Err(e) => {
+                error!(
+                    "LLM post-processing failed for provider '{}': {}. Falling back to original transcription.",
+                    provider.id,
+                    e
+                );
+                return None;
+            }
+        }
+    }
+
+    // For other providers, use the standard async-openai client
     // Create OpenAI-compatible client
     let client = match crate::llm_client::create_client(&provider, api_key) {
         Ok(client) => client,
