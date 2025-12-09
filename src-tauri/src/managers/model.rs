@@ -14,7 +14,7 @@ use std::sync::Mutex;
 use tar::Archive;
 use tauri::{AppHandle, Emitter, Manager};
 
-#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
 pub enum EngineType {
     Whisper,
     Parakeet,
@@ -67,119 +67,30 @@ impl ModelManager {
         let mut available_models = HashMap::new();
 
         // TODO this should be read from a JSON file or something..
-        available_models.insert(
-            "small".to_string(),
-            ModelInfo {
-                id: "small".to_string(),
-                name: "Whisper Small".to_string(),
-                description: "Fast and fairly accurate.".to_string(),
-                filename: "ggml-small.bin".to_string(),
-                url: Some("https://blob.handy.computer/ggml-small.bin".to_string()),
-                size_mb: 487,
-                is_downloaded: false,
-                is_downloading: false,
-                partial_size: 0,
-                is_directory: false,
-                engine_type: EngineType::Whisper,
-                accuracy_score: 0.60,
-                speed_score: 0.85,
-            },
-        );
+        // Whisper models are no longer supported - using parakeet-rs for native streaming support
+        // Only NVIDIA Parakeet models are available now
 
-        // Add downloadable models
+        // Add NVIDIA Parakeet models for streaming (parakeet-rs compatible)
+        // These models are optimized for real-time streaming ASR with End-of-Utterance detection
+        // parakeet-rs requires ONNX format files (encoder.onnx, decoder_joint.onnx, tokenizer.json)
         available_models.insert(
-            "medium".to_string(),
+            "parakeet-eou-120m".to_string(),
             ModelInfo {
-                id: "medium".to_string(),
-                name: "Whisper Medium".to_string(),
-                description: "Good accuracy, medium speed".to_string(),
-                filename: "whisper-medium-q4_1.bin".to_string(),
-                url: Some("https://blob.handy.computer/whisper-medium-q4_1.bin".to_string()),
-                size_mb: 492, // Approximate size
-                is_downloaded: false,
-                is_downloading: false,
-                partial_size: 0,
-                is_directory: false,
-                engine_type: EngineType::Whisper,
-                accuracy_score: 0.75,
-                speed_score: 0.60,
-            },
-        );
-
-        available_models.insert(
-            "turbo".to_string(),
-            ModelInfo {
-                id: "turbo".to_string(),
-                name: "Whisper Turbo".to_string(),
-                description: "Balanced accuracy and speed.".to_string(),
-                filename: "ggml-large-v3-turbo.bin".to_string(),
-                url: Some("https://blob.handy.computer/ggml-large-v3-turbo.bin".to_string()),
-                size_mb: 1600, // Approximate size
-                is_downloaded: false,
-                is_downloading: false,
-                partial_size: 0,
-                is_directory: false,
-                engine_type: EngineType::Whisper,
-                accuracy_score: 0.80,
-                speed_score: 0.40,
-            },
-        );
-
-        available_models.insert(
-            "large".to_string(),
-            ModelInfo {
-                id: "large".to_string(),
-                name: "Whisper Large".to_string(),
-                description: "Good accuracy, but slow.".to_string(),
-                filename: "ggml-large-v3-q5_0.bin".to_string(),
-                url: Some("https://blob.handy.computer/ggml-large-v3-q5_0.bin".to_string()),
-                size_mb: 1100, // Approximate size
-                is_downloaded: false,
-                is_downloading: false,
-                partial_size: 0,
-                is_directory: false,
-                engine_type: EngineType::Whisper,
-                accuracy_score: 0.85,
-                speed_score: 0.30,
-            },
-        );
-
-        // Add NVIDIA Parakeet models (directory-based)
-        available_models.insert(
-            "parakeet-tdt-0.6b-v2".to_string(),
-            ModelInfo {
-                id: "parakeet-tdt-0.6b-v2".to_string(),
-                name: "Parakeet V2".to_string(),
-                description: "English only. The best model for English speakers.".to_string(),
-                filename: "parakeet-tdt-0.6b-v2-int8".to_string(), // Directory name
-                url: Some("https://blob.handy.computer/parakeet-v2-int8.tar.gz".to_string()),
-                size_mb: 473, // Approximate size for int8 quantized model
+                id: "parakeet-eou-120m".to_string(),
+                name: "Parakeet EOU 120M".to_string(),
+                description: "NVIDIA Parakeet streaming ASR with End-of-Utterance detection. Optimized for real-time transcription with low latency.".to_string(),
+                filename: "parakeet-eou-120m-v1".to_string(), // Directory name
+                // Using ONNX-converted models from altunenes/parakeet-rs repo
+                // Direct link to the realtime_eou_120m-v1-onnx directory
+                url: Some("https://huggingface.co/altunenes/parakeet-rs/archive/main.tar.gz".to_string()),
+                size_mb: 350, // Approximate size of full repo (~120MB for the model dir)
                 is_downloaded: false,
                 is_downloading: false,
                 partial_size: 0,
                 is_directory: true,
                 engine_type: EngineType::Parakeet,
-                accuracy_score: 0.85,
-                speed_score: 0.85,
-            },
-        );
-
-        available_models.insert(
-            "parakeet-tdt-0.6b-v3".to_string(),
-            ModelInfo {
-                id: "parakeet-tdt-0.6b-v3".to_string(),
-                name: "Parakeet V3".to_string(),
-                description: "Fast and accurate".to_string(),
-                filename: "parakeet-tdt-0.6b-v3-int8".to_string(), // Directory name
-                url: Some("https://blob.handy.computer/parakeet-v3-int8.tar.gz".to_string()),
-                size_mb: 478, // Approximate size for int8 quantized model
-                is_downloaded: false,
-                is_downloading: false,
-                partial_size: 0,
-                is_directory: true,
-                engine_type: EngineType::Parakeet,
-                accuracy_score: 0.80,
-                speed_score: 0.85,
+                accuracy_score: 0.85, // High accuracy
+                speed_score: 0.90, // Very fast for streaming
             },
         );
 
@@ -213,29 +124,59 @@ impl ModelManager {
 
     fn migrate_bundled_models(&self) -> Result<()> {
         // Check for bundled models and copy them to user directory
-        let bundled_models = ["ggml-small.bin"]; // Add other bundled models here if any
+        // No bundled Parakeet models currently - they are downloaded on demand
+        Ok(())
+    }
 
-        for filename in &bundled_models {
-            let bundled_path = self.app_handle.path().resolve(
-                &format!("resources/models/{}", filename),
-                tauri::path::BaseDirectory::Resource,
+    /// Recursively find a directory containing parakeet-rs model files
+    /// (encoder.onnx, decoder_joint.onnx, tokenizer.json)
+    fn find_parakeet_model_dir(&self, start_dir: &PathBuf) -> Result<Option<PathBuf>> {
+        // Check if this directory contains the required parakeet-rs model files
+        let has_encoder = start_dir.join("encoder.onnx").exists();
+        let has_decoder = start_dir.join("decoder_joint.onnx").exists();
+        let has_tokenizer = start_dir.join("tokenizer.json").exists();
+
+        if has_encoder && has_decoder && has_tokenizer {
+            debug!(
+                "Found parakeet model files in: {:?}",
+                start_dir.display()
             );
+            // List files in this directory for debugging
+            if let Ok(entries) = fs::read_dir(start_dir) {
+                let files: Vec<_> = entries
+                    .filter_map(|e| e.ok().map(|f| f.file_name().to_string_lossy().to_string()))
+                    .collect();
+                debug!("Directory contents: {:?}", files);
+            }
+            return Ok(Some(start_dir.clone()));
+        }
 
-            if let Ok(bundled_path) = bundled_path {
-                if bundled_path.exists() {
-                    let user_path = self.models_dir.join(filename);
+        // Recursively search subdirectories (one level deep to avoid too much recursion)
+        for entry in fs::read_dir(start_dir)? {
+            if let Ok(entry) = entry {
+                let path = entry.path();
+                if path.is_dir() {
+                    // Check if this subdirectory contains the model files
+                    let has_encoder = path.join("encoder.onnx").exists();
+                    let has_decoder = path.join("decoder_joint.onnx").exists();
+                    let has_tokenizer = path.join("tokenizer.json").exists();
 
-                    // Only copy if user doesn't already have the model
-                    if !user_path.exists() {
-                        info!("Migrating bundled model {} to user directory", filename);
-                        fs::copy(&bundled_path, &user_path)?;
-                        info!("Successfully migrated {}", filename);
+                    if has_encoder && has_decoder && has_tokenizer {
+                        debug!("Found parakeet model files in: {:?}", path.display());
+                        // List files in this directory for debugging
+                        if let Ok(entries) = fs::read_dir(&path) {
+                            let files: Vec<_> = entries
+                                .filter_map(|e| e.ok().map(|f| f.file_name().to_string_lossy().to_string()))
+                                .collect();
+                            debug!("Directory contents: {:?}", files);
+                        }
+                        return Ok(Some(path));
                     }
                 }
             }
         }
 
-        Ok(())
+        Ok(None)
     }
 
     fn update_download_status(&self) -> Result<()> {
@@ -532,28 +473,39 @@ impl ModelManager {
                 anyhow::anyhow!(error_msg)
             })?;
 
-            // Find the actual extracted directory (archive might have a nested structure)
-            let extracted_dirs: Vec<_> = fs::read_dir(&temp_extract_dir)?
-                .filter_map(|entry| entry.ok())
-                .filter(|entry| entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false))
-                .collect();
-
-            if extracted_dirs.len() == 1 {
-                // Single directory extracted, move it to the final location
-                let source_dir = extracted_dirs[0].path();
-                if final_model_dir.exists() {
-                    fs::remove_dir_all(&final_model_dir)?;
-                }
-                fs::rename(&source_dir, &final_model_dir)?;
-                // Clean up temp directory
-                let _ = fs::remove_dir_all(&temp_extract_dir);
+            // For parakeet-rs models, we need to find the directory containing the model files
+            // The archive might have a nested structure like: parakeet-rs-main/realtime_eou_120m-v1-onnx/
+            let model_source_dir = if model_info.engine_type == EngineType::Parakeet {
+                // Try to find the directory containing parakeet-rs model files (encoder.onnx, decoder_joint.onnx, tokenizer.json)
+                self.find_parakeet_model_dir(&temp_extract_dir)?
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "Could not find parakeet model files in extracted archive. \
+                             Expected to find encoder.onnx, decoder_joint.onnx, and tokenizer.json"
+                        )
+                    })?
             } else {
-                // Multiple items or no directories, rename the temp directory itself
-                if final_model_dir.exists() {
-                    fs::remove_dir_all(&final_model_dir)?;
+                // For other model types, use the standard extraction logic
+                let extracted_dirs: Vec<_> = fs::read_dir(&temp_extract_dir)?
+                    .filter_map(|entry| entry.ok())
+                    .filter(|entry| entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false))
+                    .collect();
+
+                if extracted_dirs.len() == 1 {
+                    extracted_dirs[0].path()
+                } else {
+                    temp_extract_dir.clone()
                 }
-                fs::rename(&temp_extract_dir, &final_model_dir)?;
+            };
+
+            // Move the model directory to the final location
+            if final_model_dir.exists() {
+                fs::remove_dir_all(&final_model_dir)?;
             }
+            fs::rename(&model_source_dir, &final_model_dir)?;
+
+            // Clean up temp directory if it still exists
+            let _ = fs::remove_dir_all(&temp_extract_dir);
 
             info!("Successfully extracted archive for model: {}", model_id);
             // Emit extraction completed event

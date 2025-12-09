@@ -292,6 +292,7 @@ impl ShortcutAction for TranscribeAction {
         // Load model in the background
         let tm = app.state::<Arc<TranscriptionManager>>();
         tm.initiate_model_load();
+        tm.reset_streaming_accumulation();  // Reset for new recording session
 
         let binding_id = binding_id.to_string();
         change_tray_icon(app, TrayIconState::Recording);
@@ -394,105 +395,120 @@ impl ShortcutAction for TranscribeAction {
 
                 let transcription_time = Instant::now();
                 let samples_clone = samples.clone(); // Clone for history saving
-                match tm.transcribe(samples) {
-                    Ok(transcription) => {
-                        debug!(
-                            "Transcription completed in {:?}: '{}'",
-                            transcription_time.elapsed(),
-                            transcription
-                        );
-                        if !transcription.is_empty() {
-                            // Set the final transcription in the overlay (replaces any partial transcriptions)
-                            crate::overlay::set_final_transcription(&ah, &transcription);
 
-                            let settings = get_settings(&ah);
-                            let mut final_text = transcription.clone();
-                            let mut post_processed_text: Option<String> = None;
-                            let mut post_process_prompt: Option<String> = None;
+                // With streaming parakeet-rs, transcribe the final batch and then finalize
+                let mut transcription = String::new();
+                if !samples.is_empty() {
+                    if let Ok(partial) = tm.transcribe(samples) {
+                        transcription.push_str(&partial);
+                    }
+                }
 
-                            // Check if post-processing is needed
-                            let needs_post_processing = settings.post_process_enabled
-                                || (settings.selected_language == "zh-Hans"
-                                    || settings.selected_language == "zh-Hant");
-
-                            // If post-processing is needed, show that state
-                            if needs_post_processing {
-                                crate::overlay::show_post_processing_overlay(&ah);
+                // Finalize to flush any remaining audio in the streaming buffer
+                match tm.finalize_transcription() {
+                    Ok(final_chunk) => {
+                        if !final_chunk.is_empty() {
+                            if !transcription.is_empty() {
+                                transcription.push(' ');
                             }
-
-                            // First, check if Chinese variant conversion is needed
-                            if let Some(converted_text) =
-                                maybe_convert_chinese_variant(&settings, &transcription).await
-                            {
-                                final_text = converted_text.clone();
-                                post_processed_text = Some(converted_text);
-                            }
-                            // Then apply regular post-processing if enabled
-                            else if let Some(processed_text) =
-                                maybe_post_process_transcription(&settings, &transcription).await
-                            {
-                                final_text = processed_text.clone();
-                                post_processed_text = Some(processed_text);
-
-                                // Get the prompt that was used
-                                if let Some(prompt_id) = &settings.post_process_selected_prompt_id {
-                                    if let Some(prompt) = settings
-                                        .post_process_prompts
-                                        .iter()
-                                        .find(|p| &p.id == prompt_id)
-                                    {
-                                        post_process_prompt = Some(prompt.prompt.clone());
-                                    }
-                                }
-                            }
-
-                            // Save to history with post-processed text and prompt
-                            let hm_clone = Arc::clone(&hm);
-                            let transcription_for_history = transcription.clone();
-                            tauri::async_runtime::spawn(async move {
-                                if let Err(e) = hm_clone
-                                    .save_transcription(
-                                        samples_clone,
-                                        transcription_for_history,
-                                        post_processed_text,
-                                        post_process_prompt,
-                                    )
-                                    .await
-                                {
-                                    error!("Failed to save transcription to history: {}", e);
-                                }
-                            });
-
-                            // Paste the final text (either processed or original)
-                            let ah_clone = ah.clone();
-                            let paste_time = Instant::now();
-                            ah.run_on_main_thread(move || {
-                                match utils::paste(final_text, ah_clone.clone()) {
-                                    Ok(()) => debug!(
-                                        "Text pasted successfully in {:?}",
-                                        paste_time.elapsed()
-                                    ),
-                                    Err(e) => error!("Failed to paste transcription: {}", e),
-                                }
-                                // Hide the overlay after pasting is complete
-                                utils::hide_recording_overlay(&ah_clone);
-                                change_tray_icon(&ah_clone, TrayIconState::Idle);
-                            })
-                            .unwrap_or_else(|e| {
-                                error!("Failed to run paste on main thread: {:?}", e);
-                                utils::hide_recording_overlay(&ah);
-                                change_tray_icon(&ah, TrayIconState::Idle);
-                            });
-                        } else {
-                            utils::hide_recording_overlay(&ah);
-                            change_tray_icon(&ah, TrayIconState::Idle);
+                            transcription.push_str(&final_chunk);
                         }
                     }
-                    Err(err) => {
-                        debug!("Global Shortcut Transcription error: {}", err);
+                    Err(e) => {
+                        debug!("Finalization warning (non-fatal): {}", e);
+                    }
+                }
+
+                if !transcription.is_empty() {
+                    debug!(
+                        "Transcription completed in {:?}: '{}'",
+                        transcription_time.elapsed(),
+                        transcription
+                    );
+                    // Set the final transcription in the overlay (replaces any partial transcriptions)
+                    crate::overlay::set_final_transcription(&ah, &transcription);
+
+                    let settings = get_settings(&ah);
+                    let mut final_text = transcription.clone();
+                    let mut post_processed_text: Option<String> = None;
+                    let mut post_process_prompt: Option<String> = None;
+
+                    // Check if post-processing is needed
+                    let needs_post_processing = settings.post_process_enabled
+                        || (settings.selected_language == "zh-Hans"
+                            || settings.selected_language == "zh-Hant");
+
+                    // If post-processing is needed, show that state
+                    if needs_post_processing {
+                        crate::overlay::show_post_processing_overlay(&ah);
+                    }
+
+                    // First, check if Chinese variant conversion is needed
+                    if let Some(converted_text) =
+                        maybe_convert_chinese_variant(&settings, &transcription).await
+                    {
+                        final_text = converted_text.clone();
+                        post_processed_text = Some(converted_text);
+                    }
+                    // Then apply regular post-processing if enabled
+                    else if let Some(processed_text) =
+                        maybe_post_process_transcription(&settings, &transcription).await
+                    {
+                        final_text = processed_text.clone();
+                        post_processed_text = Some(processed_text);
+
+                        // Get the prompt that was used
+                        if let Some(prompt_id) = &settings.post_process_selected_prompt_id {
+                            if let Some(prompt) = settings
+                                .post_process_prompts
+                                .iter()
+                                .find(|p| &p.id == prompt_id)
+                            {
+                                post_process_prompt = Some(prompt.prompt.clone());
+                            }
+                        }
+                    }
+
+                    // Save to history with post-processed text and prompt
+                    let hm_clone = Arc::clone(&hm);
+                    let transcription_for_history = transcription.clone();
+                    tauri::async_runtime::spawn(async move {
+                        if let Err(e) = hm_clone
+                            .save_transcription(
+                                samples_clone,
+                                transcription_for_history,
+                                post_processed_text,
+                                post_process_prompt,
+                            )
+                            .await
+                        {
+                            error!("Failed to save transcription to history: {}", e);
+                        }
+                    });
+
+                    // Paste the final text (either processed or original)
+                    let ah_clone = ah.clone();
+                    let paste_time = Instant::now();
+                    ah.run_on_main_thread(move || {
+                        match utils::paste(final_text, ah_clone.clone()) {
+                            Ok(()) => debug!(
+                                "Text pasted successfully in {:?}",
+                                paste_time.elapsed()
+                            ),
+                            Err(e) => error!("Failed to paste transcription: {}", e),
+                        }
+                        // Hide the overlay after pasting is complete
+                        utils::hide_recording_overlay(&ah_clone);
+                        change_tray_icon(&ah_clone, TrayIconState::Idle);
+                    })
+                    .unwrap_or_else(|e| {
+                        error!("Failed to run paste on main thread: {:?}", e);
                         utils::hide_recording_overlay(&ah);
                         change_tray_icon(&ah, TrayIconState::Idle);
-                    }
+                    });
+                } else {
+                    utils::hide_recording_overlay(&ah);
+                    change_tray_icon(&ah, TrayIconState::Idle);
                 }
             } else {
                 debug!("No samples retrieved from recording stop");

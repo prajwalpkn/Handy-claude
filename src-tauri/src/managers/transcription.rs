@@ -3,21 +3,13 @@ use crate::managers::model::{EngineType, ModelManager};
 use crate::settings::{get_settings, ModelUnloadTimeout};
 use anyhow::Result;
 use log::{debug, error, info, warn};
+use parakeet_rs::ParakeetEOU;
 use serde::Serialize;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, SystemTime};
 use tauri::{AppHandle, Emitter};
-use transcribe_rs::{
-    engines::{
-        parakeet::{
-            ParakeetEngine, ParakeetInferenceParams, ParakeetModelParams, TimestampGranularity,
-        },
-        whisper::{WhisperEngine, WhisperInferenceParams},
-    },
-    TranscriptionEngine,
-};
 
 #[derive(Clone, Debug, Serialize)]
 pub struct ModelStateEvent {
@@ -27,14 +19,9 @@ pub struct ModelStateEvent {
     pub error: Option<String>,
 }
 
-enum LoadedEngine {
-    Whisper(WhisperEngine),
-    Parakeet(ParakeetEngine),
-}
-
 #[derive(Clone)]
 pub struct TranscriptionManager {
-    engine: Arc<Mutex<Option<LoadedEngine>>>,
+    engine: Arc<Mutex<Option<ParakeetEOU>>>,
     model_manager: Arc<ModelManager>,
     app_handle: AppHandle,
     current_model_id: Arc<Mutex<Option<String>>>,
@@ -43,6 +30,7 @@ pub struct TranscriptionManager {
     watcher_handle: Arc<Mutex<Option<thread::JoinHandle<()>>>>,
     is_loading: Arc<Mutex<bool>>,
     loading_condvar: Arc<Condvar>,
+    streaming_accumulation: Arc<Mutex<String>>,  // Accumulates text from streaming chunks
 }
 
 impl TranscriptionManager {
@@ -62,6 +50,7 @@ impl TranscriptionManager {
             watcher_handle: Arc::new(Mutex::new(None)),
             is_loading: Arc::new(Mutex::new(false)),
             loading_condvar: Arc::new(Condvar::new()),
+            streaming_accumulation: Arc::new(Mutex::new(String::new())),
         };
 
         // Start the idle watcher
@@ -138,12 +127,6 @@ impl TranscriptionManager {
 
         {
             let mut engine = self.engine.lock().unwrap();
-            if let Some(ref mut loaded_engine) = *engine {
-                match loaded_engine {
-                    LoadedEngine::Whisper(ref mut whisper) => whisper.unload_model(),
-                    LoadedEngine::Parakeet(ref mut parakeet) => parakeet.unload_model(),
-                }
-            }
             *engine = None; // Drop the engine to free memory
         }
         {
@@ -204,53 +187,51 @@ impl TranscriptionManager {
             return Err(anyhow::anyhow!(error_msg));
         }
 
+        // parakeet-rs only supports Parakeet models
+        if model_info.engine_type != EngineType::Parakeet {
+            let error_msg = "parakeet-rs only supports Parakeet models. Whisper models are no longer supported.";
+            let _ = self.app_handle.emit(
+                "model-state-changed",
+                ModelStateEvent {
+                    event_type: "loading_failed".to_string(),
+                    model_id: Some(model_id.to_string()),
+                    model_name: Some(model_info.name.clone()),
+                    error: Some(error_msg.to_string()),
+                },
+            );
+            return Err(anyhow::anyhow!(error_msg));
+        }
+
         let model_path = self.model_manager.get_model_path(model_id)?;
 
-        // Create appropriate engine based on model type
-        let loaded_engine = match model_info.engine_type {
-            EngineType::Whisper => {
-                let mut engine = WhisperEngine::new();
-                engine.load_model(&model_path).map_err(|e| {
-                    let error_msg = format!("Failed to load whisper model {}: {}", model_id, e);
-                    let _ = self.app_handle.emit(
-                        "model-state-changed",
-                        ModelStateEvent {
-                            event_type: "loading_failed".to_string(),
-                            model_id: Some(model_id.to_string()),
-                            model_name: Some(model_info.name.clone()),
-                            error: Some(error_msg.clone()),
-                        },
-                    );
-                    anyhow::anyhow!(error_msg)
-                })?;
-                LoadedEngine::Whisper(engine)
-            }
-            EngineType::Parakeet => {
-                let mut engine = ParakeetEngine::new();
-                engine
-                    .load_model_with_params(&model_path, ParakeetModelParams::int8())
-                    .map_err(|e| {
-                        let error_msg =
-                            format!("Failed to load parakeet model {}: {}", model_id, e);
-                        let _ = self.app_handle.emit(
-                            "model-state-changed",
-                            ModelStateEvent {
-                                event_type: "loading_failed".to_string(),
-                                model_id: Some(model_id.to_string()),
-                                model_name: Some(model_info.name.clone()),
-                                error: Some(error_msg.clone()),
-                            },
-                        );
-                        anyhow::anyhow!(error_msg)
-                    })?;
-                LoadedEngine::Parakeet(engine)
-            }
-        };
+        // Log the model path and verify files exist
+        info!("Loading model from path: {:?}", model_path.display());
+        if let Ok(entries) = std::fs::read_dir(&model_path) {
+            let files: Vec<_> = entries
+                .filter_map(|e| e.ok().map(|f| f.file_name().to_string_lossy().to_string()))
+                .collect();
+            info!("Model directory contents: {:?}", files);
+        }
+
+        // Load Parakeet model using streaming EOU variant
+        let engine = ParakeetEOU::from_pretrained(&model_path, None).map_err(|e| {
+            let error_msg = format!("Failed to load parakeet model {}: {}", model_id, e);
+            let _ = self.app_handle.emit(
+                "model-state-changed",
+                ModelStateEvent {
+                    event_type: "loading_failed".to_string(),
+                    model_id: Some(model_id.to_string()),
+                    model_name: Some(model_info.name.clone()),
+                    error: Some(error_msg.clone()),
+                },
+            );
+            anyhow::anyhow!(error_msg)
+        })?;
 
         // Update the current engine and model ID
         {
-            let mut engine = self.engine.lock().unwrap();
-            *engine = Some(loaded_engine);
+            let mut engine_guard = self.engine.lock().unwrap();
+            *engine_guard = Some(engine);
         }
         {
             let mut current_model = self.current_model_id.lock().unwrap();
@@ -302,6 +283,20 @@ impl TranscriptionManager {
         current_model.clone()
     }
 
+    /// Reset streaming accumulation for a new recording session
+    pub fn reset_streaming_accumulation(&self) {
+        let mut acc = self.streaming_accumulation.lock().unwrap();
+        acc.clear();
+    }
+
+    /// Get the current accumulated transcription text (for real-time display)
+    pub fn get_accumulated_text(&self) -> String {
+        let acc = self.streaming_accumulation.lock().unwrap();
+        acc.clone()
+    }
+
+    /// Transcribe a chunk of audio using streaming mode
+    /// Returns incremental text that resulted from processing this chunk
     pub fn transcribe(&self, audio: Vec<f32>) -> Result<String> {
         // Update last activity timestamp
         self.last_activity.store(
@@ -338,7 +333,8 @@ impl TranscriptionManager {
         // Get current settings for configuration
         let settings = get_settings(&self.app_handle);
 
-        // Perform transcription with the appropriate engine
+        // Perform streaming transcription using ParakeetEOU
+        // The is_final flag indicates whether more audio is coming
         let result = {
             let mut engine_guard = self.engine.lock().unwrap();
             let engine = engine_guard.as_mut().ok_or_else(|| {
@@ -347,75 +343,133 @@ impl TranscriptionManager {
                 )
             })?;
 
-            match engine {
-                LoadedEngine::Whisper(whisper_engine) => {
-                    // Normalize language code for Whisper
-                    // Convert zh-Hans and zh-Hant to zh since Whisper uses ISO 639-1 codes
-                    let whisper_language = if settings.selected_language == "auto" {
-                        None
-                    } else {
-                        let normalized = if settings.selected_language == "zh-Hans"
-                            || settings.selected_language == "zh-Hant"
-                        {
-                            "zh".to_string()
-                        } else {
-                            settings.selected_language.clone()
-                        };
-                        Some(normalized)
-                    };
+            // Process the chunk with streaming (reset_on_eou=false to maintain context across chunks)
+            // With EOU detection, text is emitted when end-of-utterance is detected
+            debug!("Calling ParakeetEOU::transcribe with {} audio samples", audio.len());
+            let transcribe_result = engine
+                .transcribe(&audio, false)
+                .map_err(|e| anyhow::anyhow!("Parakeet streaming transcription failed: {}", e))?;
+            debug!("ParakeetEOU::transcribe returned RAW: '{}'", transcribe_result);
+            debug!("ParakeetEOU::transcribe returned bytes: {:?}", transcribe_result.as_bytes());
+            debug!("ParakeetEOU::transcribe returned length: {}", transcribe_result.len());
+            transcribe_result
+        };
 
-                    let params = WhisperInferenceParams {
-                        language: whisper_language,
-                        translate: settings.translate_to_english,
-                        ..Default::default()
-                    };
+        // Log raw result before any filtering
+        info!("Raw transcription result before filtering: '{}'", result);
 
-                    whisper_engine
-                        .transcribe_samples(audio, Some(params))
-                        .map_err(|e| anyhow::anyhow!("Whisper transcription failed: {}", e))?
-                }
-                LoadedEngine::Parakeet(parakeet_engine) => {
-                    let params = ParakeetInferenceParams {
-                        timestamp_granularity: TimestampGranularity::Segment,
-                        ..Default::default()
-                    };
+        // Remove EOU marker if present (End-of-Utterance token from parakeet)
+        let cleaned_result = result.replace("<|endoftext|>", "").replace("EOU", "").trim().to_string();
+        info!("After filtering: '{}'", cleaned_result);
 
-                    parakeet_engine
-                        .transcribe_samples(audio, Some(params))
-                        .map_err(|e| anyhow::anyhow!("Parakeet transcription failed: {}", e))?
+        // Apply word correction if custom words are configured
+        let corrected_result = if !settings.custom_words.is_empty() {
+            apply_custom_words(
+                &cleaned_result,
+                &settings.custom_words,
+                settings.word_correction_threshold,
+            )
+        } else {
+            cleaned_result
+        };
+
+        let et = std::time::Instant::now();
+        debug!(
+            "Streaming transcription chunk completed in {}ms",
+            (et - st).as_millis()
+        );
+
+        let final_result = corrected_result.trim().to_string();
+
+        if !final_result.is_empty() {
+            debug!("Transcription chunk result: {}", final_result);
+            // Accumulate this chunk result for final transcription
+            let mut accumulation = self.streaming_accumulation.lock().unwrap();
+            if !accumulation.is_empty() {
+                accumulation.push(' ');  // Add space between chunks
+            }
+            accumulation.push_str(&final_result);
+        } else {
+            debug!("Transcription returned empty result for audio chunk of {} samples", audio.len());
+        }
+
+        Ok(final_result)
+    }
+
+    /// Finalize transcription by processing any remaining audio
+    /// Call this when recording stops to get the final result
+    pub fn finalize_transcription(&self) -> Result<String> {
+        let st = std::time::Instant::now();
+
+        debug!("Finalizing transcription");
+
+        // Ensure model is loaded
+        {
+            let engine_guard = self.engine.lock().unwrap();
+            if engine_guard.is_none() {
+                return Err(anyhow::anyhow!("Model is not loaded for transcription."));
+            }
+        }
+
+        let settings = get_settings(&self.app_handle);
+
+        // Get accumulated streaming results (if any)
+        let accumulated = {
+            let mut acc = self.streaming_accumulation.lock().unwrap();
+            let result = acc.clone();
+            acc.clear();  // Clear for next recording
+            result
+        };
+
+        // If we have accumulated results from streaming, use those as the primary result
+        // Otherwise, try to flush remaining audio from the model buffer
+        let result = if !accumulated.is_empty() {
+            debug!("Using accumulated streaming results: '{}'", accumulated);
+            accumulated
+        } else {
+            debug!("No accumulated streaming results, flushing model buffer with silence");
+            // Process final empty chunk with is_final=true to flush remaining audio
+            let mut final_text = String::new();
+            let mut engine_guard = self.engine.lock().unwrap();
+            let engine = engine_guard.as_mut().ok_or_else(|| {
+                anyhow::anyhow!("Model failed to load for finalization.")
+            })?;
+
+            // Flush any remaining audio in the buffer with silence and reset_on_eou=true
+            // We send multiple silence chunks to flush the model's internal buffers
+            let silence = vec![0.0f32; 2560]; // 160ms of silence at 16kHz
+            for _ in 0..3 {
+                let text = engine
+                    .transcribe(&silence, true)
+                    .map_err(|e| anyhow::anyhow!("Parakeet finalization failed: {}", e))?;
+                if !text.is_empty() {
+                    final_text.push_str(&text);
                 }
             }
+            final_text
         };
 
         // Apply word correction if custom words are configured
         let corrected_result = if !settings.custom_words.is_empty() {
             apply_custom_words(
-                &result.text,
+                &result,
                 &settings.custom_words,
                 settings.word_correction_threshold,
             )
         } else {
-            result.text
+            result
         };
 
         let et = std::time::Instant::now();
-        let translation_note = if settings.translate_to_english {
-            " (translated)"
-        } else {
-            ""
-        };
         info!(
-            "Transcription completed in {}ms{}",
-            (et - st).as_millis(),
-            translation_note
+            "Transcription finalization completed in {}ms",
+            (et - st).as_millis()
         );
 
         let final_result = corrected_result.trim().to_string();
 
-        if final_result.is_empty() {
-            info!("Transcription result is empty");
-        } else {
-            info!("Transcription result: {}", final_result);
+        if !final_result.is_empty() {
+            info!("Final transcription result: {}", final_result);
         }
 
         // Check if we should immediately unload the model after transcription

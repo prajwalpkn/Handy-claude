@@ -268,9 +268,11 @@ fn run_consumer(
     let mut recording = false;
 
     // For periodic chunk emission during recording
-    // Emit chunks every ~1 second (16,000 samples at 16kHz)
-    const CHUNK_SIZE: usize = 16_000;
+    // Emit chunks every 160ms (2560 samples at 16kHz) for streaming transcription
+    // This matches the Parakeet model's expected chunk size
+    const CHUNK_SIZE: usize = 2_560;
     let mut samples_since_last_chunk = 0;
+    let mut last_emitted_pos = 0;  // Track what we've already emitted
 
     // ---------- spectrum visualisation setup ---------------------------- //
     const BUCKETS: usize = 16;
@@ -289,6 +291,7 @@ fn run_consumer(
         vad: &Option<Arc<Mutex<Box<dyn vad::VoiceActivityDetector>>>>,
         out_buf: &mut Vec<f32>,
         samples_since_last_chunk: &mut usize,
+        last_emitted_pos: &mut usize,
         chunk_cb: &Option<Arc<dyn Fn(Vec<f32>) + Send + Sync + 'static>>,
     ) -> usize {
         if !recording {
@@ -311,17 +314,25 @@ fn run_consumer(
             added_samples = samples.len();
         }
 
-        // Check if we should emit a chunk
+        // Check if we should emit a chunk for streaming transcription
         if added_samples > 0 {
             *samples_since_last_chunk += added_samples;
 
-            // If we've accumulated enough samples, emit a chunk for real-time transcription
-            if *samples_since_last_chunk >= CHUNK_SIZE {
-                if let Some(cb) = chunk_cb {
-                    // Clone the accumulated samples and emit them
-                    cb(out_buf.clone());
+            // Emit fresh 160ms chunks (2560 samples at 16kHz) for streaming transcription
+            while *samples_since_last_chunk >= CHUNK_SIZE {
+                let chunk_end = *last_emitted_pos + CHUNK_SIZE;
+                if chunk_end <= out_buf.len() {
+                    let chunk_to_emit: Vec<f32> = out_buf[*last_emitted_pos..chunk_end].to_vec();
+
+                    if let Some(cb) = chunk_cb {
+                        cb(chunk_to_emit);
+                    }
+
+                    *last_emitted_pos = chunk_end;
+                    *samples_since_last_chunk = samples_since_last_chunk.saturating_sub(CHUNK_SIZE);
+                } else {
+                    break;
                 }
-                *samples_since_last_chunk = 0;
             }
         }
 
@@ -349,6 +360,7 @@ fn run_consumer(
                 &vad,
                 &mut processed_samples,
                 &mut samples_since_last_chunk,
+                &mut last_emitted_pos,
                 &chunk_cb,
             );
         });
@@ -360,6 +372,7 @@ fn run_consumer(
                     processed_samples.clear();
                     recording = true;
                     samples_since_last_chunk = 0; // Reset chunk counter
+                    last_emitted_pos = 0;  // Reset emission tracker
                     visualizer.reset(); // Reset visualization buffer
                     if let Some(v) = &vad {
                         v.lock().unwrap().reset();
@@ -371,12 +384,15 @@ fn run_consumer(
                     frame_resampler.finish(&mut |frame: &[f32]| {
                         // we still want to process the last few frames
                         // Note: we don't emit chunks on stop, as the final full transcription will happen
+                        let mut dummy_samples_since_chunk = 0;
+                        let mut dummy_last_emitted = 0;
                         handle_frame(
                             frame,
                             true,
                             &vad,
                             &mut processed_samples,
-                            &mut 0, // Don't track chunks in final processing
+                            &mut dummy_samples_since_chunk,
+                            &mut dummy_last_emitted,
                             &None,  // Don't emit chunks when finishing
                         );
                     });

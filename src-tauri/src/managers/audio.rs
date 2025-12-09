@@ -153,10 +153,12 @@ fn create_audio_recorder(
 
                     // Transcribe the chunk
                     match tm.transcribe(chunk) {
-                        Ok(text) => {
-                            if !text.is_empty() {
-                                // Emit the partial transcription to the overlay
-                                crate::overlay::emit_transcription_update(&ah, &text);
+                        Ok(_text) => {
+                            // Get the full accumulated text and emit it for real-time display
+                            let accumulated = tm.get_accumulated_text();
+                            if !accumulated.is_empty() {
+                                // Emit the accumulated transcription to the overlay for real-time feedback
+                                crate::overlay::emit_transcription_update(&ah, &accumulated);
                             }
                         }
                         Err(e) => {
